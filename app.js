@@ -26,7 +26,10 @@ const setStatus = (message) => {
 const formatNumber = (value) =>
   typeof value === "number" ? new Intl.NumberFormat("en").format(value) : null;
 
-const firstValue = (...values) => values.find((value) => value !== null && value !== undefined && value !== "");
+const firstValue = (...values) =>
+  values.find(
+    (value) => value !== null && value !== undefined && value !== ""
+  );
 
 const imageForAnime = (anime) =>
   firstValue(
@@ -38,7 +41,12 @@ const imageForAnime = (anime) =>
   );
 
 const titleForAnime = (anime) =>
-  firstValue(anime.title_english, anime.title, anime.title_japanese, "Untitled anime");
+  firstValue(
+    anime.title_english,
+    anime.title,
+    anime.title_japanese,
+    "Untitled anime"
+  );
 
 const createElement = (tag, className, text) => {
   const element = document.createElement(tag);
@@ -63,7 +71,10 @@ const createAnimeCard = (anime) => {
   imageLink.href = anime.url || "#";
   imageLink.target = "_blank";
   imageLink.rel = "noopener noreferrer";
-  imageLink.setAttribute("aria-label", `Open ${titleForAnime(anime)} on MyAnimeList`);
+  imageLink.setAttribute(
+    "aria-label",
+    `Open ${titleForAnime(anime)} on MyAnimeList`
+  );
 
   const image = createElement("img", "anime-poster");
   image.src = imageForAnime(anime);
@@ -89,7 +100,9 @@ const createAnimeCard = (anime) => {
   headingBlock.appendChild(title);
 
   if (anime.title_japanese && anime.title_japanese !== titleForAnime(anime)) {
-    headingBlock.appendChild(createElement("p", "anime-alt-title", anime.title_japanese));
+    headingBlock.appendChild(
+      createElement("p", "anime-alt-title", anime.title_japanese)
+    );
   }
 
   headingRow.appendChild(headingBlock);
@@ -109,12 +122,16 @@ const createAnimeCard = (anime) => {
   const year = firstValue(anime.year, anime.aired?.prop?.from?.year);
   const metadata = [
     anime.type,
-    anime.episodes ? `${anime.episodes} ep${anime.episodes === 1 ? "" : "s"}` : null,
+    anime.episodes
+      ? `${anime.episodes} ep${anime.episodes === 1 ? "" : "s"}`
+      : null,
     year ? String(year) : null,
     anime.status,
   ].filter(Boolean);
 
-  metadata.slice(0, 4).forEach((value) => meta.appendChild(createMetaPill(value)));
+  metadata
+    .slice(0, 4)
+    .forEach((value) => meta.appendChild(createMetaPill(value)));
   body.appendChild(meta);
 
   const synopsis = createElement(
@@ -136,7 +153,11 @@ const createAnimeCard = (anime) => {
 
   if (typeof anime.members === "number") {
     footer.appendChild(
-      createElement("span", "members", `${formatNumber(anime.members)} members`)
+      createElement(
+        "span",
+        "members",
+        `${formatNumber(anime.members)} members`
+      )
     );
   }
 
@@ -170,9 +191,13 @@ const renderLoading = () => {
     skeleton.appendChild(createElement("div", "skeleton-poster"));
 
     const body = createElement("div", "anime-card-body");
-    body.appendChild(createElement("div", "skeleton-line skeleton-line-title"));
+    body.appendChild(
+      createElement("div", "skeleton-line skeleton-line-title")
+    );
     body.appendChild(createElement("div", "skeleton-line"));
-    body.appendChild(createElement("div", "skeleton-line skeleton-line-short"));
+    body.appendChild(
+      createElement("div", "skeleton-line skeleton-line-short")
+    );
     skeleton.appendChild(body);
     animeList.appendChild(skeleton);
   }
@@ -180,7 +205,9 @@ const renderLoading = () => {
 
 const renderResults = (results, query) => {
   animeList.replaceChildren();
-  resultCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
+  resultCount.textContent = `${results.length} result${
+    results.length === 1 ? "" : "s"
+  }`;
 
   if (results.length === 0) {
     renderMessage(
@@ -224,18 +251,22 @@ const searchAnime = async (rawQuery) => {
   rememberQueryInUrl(query);
   resultCount.textContent = "";
 
-  if (cache.has(query.toLowerCase())) {
-    renderResults(cache.get(query.toLowerCase()), query);
-    return;
-  }
-
   if (activeController) {
     activeController.abort();
+    activeController = null;
+  }
+
+  const requestId = ++requestSequence;
+  const cacheKey = query.toLowerCase();
+
+  if (cache.has(cacheKey)) {
+    setBusy(false);
+    renderResults(cache.get(cacheKey), query);
+    return;
   }
 
   const controller = new AbortController();
   activeController = controller;
-  const requestId = ++requestSequence;
 
   setBusy(true);
   setStatus(`Searching for ${query}…`);
@@ -264,10 +295,14 @@ const searchAnime = async (rawQuery) => {
       return;
     }
 
-    cache.set(query.toLowerCase(), results);
+    cache.set(cacheKey, results);
     renderResults(results, query);
   } catch (error) {
     if (error.name === "AbortError") {
+      return;
+    }
+
+    if (requestId !== requestSequence) {
       return;
     }
 
