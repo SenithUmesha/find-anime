@@ -1,48 +1,73 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FindAnime</title>
-    <link rel = "icon" href = "/img/icon.png" type = "image/x-icon">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css" integrity="sha512-KfkfwYDsLkIlwQp6LFnl8zNdLGxu9YAA1QvwINks4PhcElQSvqcyVLLD9aMhXd13uQjoXtEKNosOWaZqXgel0g==" crossorigin="anonymous" referrerpolicy="no-referrer" />
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0b11" />
+    <meta
+      name="description"
+      content="A tiny anime search side project powered by the Jikan API and MyAnimeList data."
+    />
+    <title>FindAnime — tiny anime search</title>
+    <link rel="icon" href="img/icon.png" type="image/png" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="app.js" defer></script>
+  </head>
 
-    <div class="container">
-        <div class="anime-wrapper">
-            <div class="anime-search">
-               <h1 class="main-title">Find<span class="main-title-span">Anime</span></h1>
-               <blockquote>Search over tens of thousands of anime & find the exact anime you are looking for</blockquote>
-
-               <div class="anime-search-box">
-                   <input type="text" class="search-control" placeholder="Search by name" id="search-input">
-                   <button type="submit" class="search-btn btn" id="search-btn">
-                       <i class="fas fa-search"></i>
-                   </button>
-               </div>
-            </div>
-
-            <div class="anime-result">
-                <h2 class="title">Your search results:</h2>
-                <div id="anime">
-                    <!-- <div class="anime-item">
-                        <div class="anime-img">
-                            <img src="img/one_piece.jpg" alt="anime">
-                        </div>
-                        <div class="anime-name">
-                            <h3>One Piece</h3>
-                            <blockquote>Follows the adventures of Monkey D. Luffy and his pirate crew in order to find the greatest treasure ever left by the legendary Pirate, Gold Roger.</blockquote>
-                            <a href="#" class="anime-btn">More info</a>
-                        </div>
-                    </div> -->
-                </div>
-            </div>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">tiny API side quest</p>
+          <h1>Find<span>Anime</span></h1>
+          <p class="hero-description">
+            Search anime by title, skim the useful bits, then jump out to MyAnimeList when something looks good.
+          </p>
         </div>
-    </div>
 
-    <script src="app.js"></script>
-</body>
+        <form class="search-panel" id="search-form" role="search">
+          <label class="sr-only" for="search-input">Anime title</label>
+          <input
+            class="search-input"
+            id="search-input"
+            type="search"
+            name="q"
+            placeholder="Try: Cowboy Bebop"
+            autocomplete="off"
+            enterkeyhint="search"
+          />
+          <button class="search-button" id="search-btn" type="submit">Search</button>
+        </form>
+
+        <div class="quick-searches" aria-label="Quick searches">
+          <span>Try</span>
+          <button type="button" data-query="Frieren">Frieren</button>
+          <button type="button" data-query="Cowboy Bebop">Cowboy Bebop</button>
+          <button type="button" data-query="One Piece">One Piece</button>
+        </div>
+
+        <p class="search-status" id="search-status" role="status" aria-live="polite">
+          Search for an anime to start.
+        </p>
+      </header>
+
+      <section class="results-section" aria-labelledby="results-title">
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">Jikan × MyAnimeList</p>
+            <h2 id="results-title">Results</h2>
+          </div>
+          <span class="result-count" id="result-count"></span>
+        </div>
+
+        <div class="anime-grid" id="anime" aria-busy="false"></div>
+      </section>
+
+      <footer class="site-footer">
+        <p>
+          No account, no backend, no tracking. Search data comes from Jikan's unofficial MyAnimeList API.
+        </p>
+      </footer>
+    </main>
+  </body>
 </html>
