@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check browser module syntax
+        run: node --check app.js
+
+      - name: Run search helper tests
+        run: node --test tests/*.test.mjs
+
+      - name: Guard against the retired Jikan v3 endpoint
+        run: |
+          if grep -R "api.jikan.moe/v3" --exclude-dir=.git --exclude="README.md" --exclude="engineering.md" .; then
+            echo "Retired Jikan v3 endpoint found in runtime files."
+            exit 1
+          fi
