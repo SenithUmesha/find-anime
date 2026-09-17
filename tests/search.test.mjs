@@ -2,12 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CACHE_TTL_MS,
   buildSearchUrl,
   cacheKeyForSearch,
+  createCacheEntry,
   imageForAnime,
   mergeAnimeResults,
   normalizeQuery,
   parseSearchPayload,
+  readCacheEntry,
+  retryAfterSeconds,
   safeHttpsUrl,
   safeMyAnimeListUrl,
   titleForAnime,
@@ -16,6 +20,7 @@ import {
 test("normalizes queries and builds encoded Jikan URLs", () => {
   assert.equal(normalizeQuery("  Fullmetal Alchemist  "), "Fullmetal Alchemist");
   assert.equal(cacheKeyForSearch("  NARUTO  ", 2), "naruto::2");
+  assert.equal(cacheKeyForSearch("Bleach", -4), "bleach::1");
 
   const url = buildSearchUrl("Cowboy Bebop", 3);
   assert.equal(url.origin + url.pathname, "https://api.jikan.moe/v4/anime");
@@ -34,7 +39,7 @@ test("parses Jikan pagination without trusting missing fields", () => {
 
   assert.deepEqual(
     parseSearchPayload({
-      data: [{ mal_id: 1 }],
+      data: [{ mal_id: 1 }, null, "bad"],
       pagination: { current_page: 2, has_next_page: true },
     }),
     {
@@ -59,6 +64,22 @@ test("merges pages by MAL id instead of duplicating entries", () => {
 
   assert.equal(merged.length, 3);
   assert.equal(merged.find((anime) => anime.mal_id === 2).title, "New Two");
+});
+
+test("expires cached search pages after the short in-memory TTL", () => {
+  const pageData = { results: [{ mal_id: 1 }], currentPage: 1, hasNextPage: false };
+  const entry = createCacheEntry(pageData, 1_000);
+
+  assert.equal(entry.expiresAt, 1_000 + CACHE_TTL_MS);
+  assert.deepEqual(readCacheEntry(entry, 1_000 + CACHE_TTL_MS - 1), pageData);
+  assert.equal(readCacheEntry(entry, 1_000 + CACHE_TTL_MS), null);
+  assert.equal(readCacheEntry(null, 1_000), null);
+});
+
+test("parses Retry-After seconds when a public API rate-limits", () => {
+  assert.equal(retryAfterSeconds("12"), 12);
+  assert.equal(retryAfterSeconds("0"), 0);
+  assert.equal(retryAfterSeconds("nope"), null);
 });
 
 test("only accepts HTTPS URLs and constrains MAL links to MyAnimeList", () => {
