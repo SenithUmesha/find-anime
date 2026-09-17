@@ -6,7 +6,7 @@ I built the first version of this in 2022 with plain HTML, CSS and JavaScript. I
 
 That API version eventually became the most interesting bug in the project: the page could still look completely fine while the external contract underneath it had gone stale.
 
-So I kept the original **no framework, no build step** idea and rebuilt the parts that actually mattered: the API boundary, stale-request handling, pagination, safe rendering, failure states, caching and a small test/CI story.
+So I kept the original **no framework, no build step** idea and rebuilt the parts that actually mattered: the API boundary, stale-request handling, pagination, timeouts, safe rendering, failure states, caching and a small test/CI story.
 
 `HTML` · `CSS` · `JavaScript` · `Jikan REST API v4` · `Node test runner`
 
@@ -16,21 +16,24 @@ So I kept the original **no framework, no build step** idea and rebuilt the part
 - submit with the button or Enter
 - use quick-search chips when you do not know what to type
 - fetch 18 results at a time from Jikan v4
-- progressively load more pages without replacing the results already on screen
+- progressively load more pages without replacing results already on screen
 - deduplicate appended pages by MyAnimeList ID
+- show how many results have been loaded versus Jikan's reported total when available
 - show poster, preferred title, Japanese title, score, type, episode count, year and status when available
 - show a short synopsis, genres and member count
 - link each result back to its MyAnimeList page
 - keep the current search in `?q=` so the URL survives reload/copy-paste
 - cache individual search pages in memory for five minutes
 - cancel stale network requests when a newer search starts
+- time out requests that sit unresolved for too long
 - protect against late responses with a request-sequence guard as well as `AbortController`
-- show loading, empty, network-error and rate-limit states
+- show loading, empty, timeout, network-error and rate-limit states
 - honor `Retry-After` when Jikan provides it
 - render third-party text with DOM APIs instead of injecting API strings through `innerHTML`
 - constrain outbound MyAnimeList links to HTTPS MyAnimeList hosts
+- avoid sending the current page URL as a referrer with poster-image requests
 - run helper tests and source checks in GitHub Actions
-- stay responsive without a framework or package install at runtime
+- stay responsive without a framework or runtime package install
 
 No account. No backend. No database. No first-party analytics.
 
@@ -53,20 +56,23 @@ form / quick search / ?q= URL
       │    abort older request
       │           │
       │           ▼
+      │      12s timeout guard
+      │           │
+      │           ▼
       │    Jikan /v4/anime
       │    q + page + limit + sfw
       │           │
-      │     ┌─────┼──────────┐
-      │     │     │          │
-      │    429   !ok       success
-      │     │     │          │
-      │     │     │          ▼
-      │     │     │    validate payload
-      │     │     │          │
-      │     │     │          ▼
-      │     │     │      cache page
-      │     │     │          │
-      └─────┴─────┴──────────┘
+      │    ┌──────┼────────────┐
+      │    │      │            │
+      │   429   timeout      success
+      │    │      │            │
+      │    │      │            ▼
+      │    │      │      validate payload
+      │    │      │            │
+      │    │      │            ▼
+      │    │      │        cache page
+      │    │      │            │
+      └────┴──────┴────────────┘
                     │
                     ▼
           commit only newest request
@@ -104,7 +110,7 @@ page 1
 merge by mal_id / URL fallback
 ```
 
-Appending uses stable anime identity instead of simply concatenating arrays, so an item repeated by the API does not show up twice.
+Appending uses stable anime identity instead of simply concatenating arrays, so an item repeated by the API does not show up twice. When Jikan exposes `pagination.items.total`, the UI also shows progress such as `36 of 84 · page 2`.
 
 There is still no router, state library or pagination component abstraction. The product does not need them.
 
@@ -123,11 +129,11 @@ explicit href/src assignment
 
 for API-provided values.
 
-Outbound result links are separately validated so a MyAnimeList URL must be HTTPS and actually belong to `myanimelist.net` (including subdomains) before it becomes a clickable external link.
+Outbound result links are separately validated so a MyAnimeList URL must be HTTPS and actually belong to `myanimelist.net` (including subdomains) before it becomes clickable.
 
-Poster URLs are also required to be HTTPS, with a bundled icon as the final fallback.
+Poster URLs must also be HTTPS, use the bundled icon as a fallback, and are loaded with `referrerPolicy = "no-referrer"` so an image host does not receive the FindAnime page URL as referrer data.
 
-## stale-request handling
+## stale-request + timeout handling
 
 Search UIs have a race that is easy to miss:
 
@@ -140,7 +146,7 @@ search A finishes later
 
 If every response is allowed to render, A can overwrite B even though B was the user's latest intent.
 
-FindAnime uses two guards:
+FindAnime uses two race guards:
 
 ```text
 AbortController
@@ -149,6 +155,8 @@ monotonic requestSequence
 ```
 
 The abort saves unnecessary work. The sequence check is the correctness boundary: only the newest request is allowed to commit results.
+
+A separate 12-second timer aborts genuinely stuck requests. That timeout is treated differently from a superseded search, so a slow API request becomes a visible timeout state instead of disappearing silently.
 
 Cached searches go through the same sequencing path, so switching rapidly between cached and uncached searches does not bypass the stale-request protection.
 
@@ -178,14 +186,15 @@ initial
 loading
 results
 no matches
+timeout
 network / HTTP failure
 429 rate limit
-load-more failure while preserving current results
+load-more timeout/failure while preserving current results
 ```
 
-For `429`, the client reads `Retry-After` when available and turns it into a useful wait message instead of pretending the API returned zero anime.
+For `429`, the client reads `Retry-After` in either seconds or HTTP-date form when available and turns it into a useful wait message instead of pretending the API returned zero anime.
 
-If loading another page fails, existing cards stay visible. A failed append should not destroy a successful first page.
+If loading another page fails or times out, existing cards stay visible. A failed append should not destroy a successful first page.
 
 ## URL state
 
@@ -219,7 +228,7 @@ find-anime/
         └── ci.yml
 ```
 
-`app.js` owns browser orchestration and rendering. `lib/search.mjs` owns the parts worth testing without a DOM: URL construction, payload parsing, page merging, cache entries, retry timing, safe URLs and display fallbacks.
+`app.js` owns browser orchestration and rendering. `lib/search.mjs` owns the parts worth testing without a DOM: URL construction, payload parsing, page merging, cache entries, retry timing, timeout policy, safe URLs and display fallbacks.
 
 ## tests + CI
 
@@ -229,15 +238,9 @@ The repository deliberately avoids adding a package manifest only to run tests. 
 node --test tests/*.test.mjs
 ```
 
-CI also runs:
+CI checks browser/helper syntax, runs the tests, verifies required static assets, and specifically guards runtime files against accidentally reintroducing the retired Jikan v3 endpoint.
 
-```bash
-node --check app.js
-```
-
-and guards the runtime tree against accidentally reintroducing the retired Jikan v3 endpoint.
-
-The tests cover query/URL normalization, pagination parsing, result deduplication, cache expiry, retry timing, HTTPS/host validation and display fallbacks.
+The tests cover query/URL normalization, pagination parsing and totals, result deduplication, cache expiry, Retry-After seconds/HTTP dates, HTTPS/host validation, timeout configuration and display fallbacks.
 
 ## run it
 
@@ -274,7 +277,7 @@ This is still an anime search toy, not a tracker or streaming service.
 
 It intentionally has no account, watchlist, local favorites, advanced filters, detail route, seasonal browser, recommendation engine, offline catalog or API proxy.
 
-It also talks directly to Jikan, which means searches are network requests to a third-party service and the app inherits that service's uptime/rate limits. "No tracking" here means this repository adds no first-party analytics layer; it does not mean network requests are invisible to external services.
+It also talks directly to Jikan, which means searches are network requests to a third-party service and the app inherits that service's uptime/rate limits. The project adds no first-party analytics, but it does not pretend external requests are invisible.
 
 ## if i kept going
 
