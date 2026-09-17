@@ -1,11 +1,14 @@
 import {
   buildSearchUrl,
   cacheKeyForSearch,
+  createCacheEntry,
   firstValue,
   imageForAnime,
   mergeAnimeResults,
   normalizeQuery,
   parseSearchPayload,
+  readCacheEntry,
+  retryAfterSeconds,
   safeMyAnimeListUrl,
   titleForAnime,
 } from "./lib/search.mjs";
@@ -268,6 +271,11 @@ const commitPage = (pageData, query, append) => {
   renderResults();
 };
 
+const rateLimitMessage = (retrySeconds) =>
+  retrySeconds === null
+    ? "Give it a moment and try again."
+    : `Try again in about ${retrySeconds} second${retrySeconds === 1 ? "" : "s"}.`;
+
 const searchAnime = async (rawQuery, { append = false } = {}) => {
   const query = normalizeQuery(rawQuery);
 
@@ -298,13 +306,17 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
 
   const requestId = ++requestSequence;
   const cacheKey = cacheKeyForSearch(query, page);
-  const cachedPage = cache.get(cacheKey);
+  const cachedPage = readCacheEntry(cache.get(cacheKey));
 
   if (cachedPage) {
     commitPage(cachedPage, query, append);
     setBusy(false);
     updateLoadMore();
     return;
+  }
+
+  if (cache.has(cacheKey)) {
+    cache.delete(cacheKey);
   }
 
   const controller = new AbortController();
@@ -327,7 +339,10 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
     });
 
     if (response.status === 429) {
-      throw new Error("RATE_LIMITED");
+      const retrySeconds = retryAfterSeconds(response.headers.get("Retry-After"));
+      const error = new Error("RATE_LIMITED");
+      error.retrySeconds = retrySeconds;
+      throw error;
     }
 
     if (!response.ok) {
@@ -340,7 +355,7 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
       return;
     }
 
-    cache.set(cacheKey, pageData);
+    cache.set(cacheKey, createCacheEntry(pageData));
     commitPage(pageData, query, append);
   } catch (error) {
     if (error.name === "AbortError" || requestId !== requestSequence) {
@@ -350,7 +365,7 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
     if (append) {
       setStatus(
         error.message === "RATE_LIMITED"
-          ? "Jikan is rate-limiting requests. Wait a moment before loading more."
+          ? `Jikan is rate-limiting requests. ${rateLimitMessage(error.retrySeconds ?? null)}`
           : "Could not load the next page. Your current results are still here."
       );
       return;
@@ -359,7 +374,7 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
     if (error.message === "RATE_LIMITED") {
       renderMessage(
         "Jikan is rate-limiting requests right now.",
-        "Give it a moment and try the search again."
+        rateLimitMessage(error.retrySeconds ?? null)
       );
       setStatus("Search temporarily rate-limited.");
     } else {
