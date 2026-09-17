@@ -1,4 +1,5 @@
 import {
+  REQUEST_TIMEOUT_MS,
   buildSearchUrl,
   cacheKeyForSearch,
   createCacheEntry,
@@ -32,6 +33,7 @@ let searchState = {
   page: 0,
   results: [],
   hasNextPage: false,
+  totalItems: null,
 };
 
 const setBusy = (isBusy, mode = null) => {
@@ -97,6 +99,7 @@ const createAnimeCard = (anime) => {
   image.alt = `${preferredTitle} poster`;
   image.loading = "lazy";
   image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
   image.addEventListener(
     "error",
     () => {
@@ -230,9 +233,12 @@ const renderLoading = () => {
 };
 
 const renderResults = () => {
-  const { results, query, page } = searchState;
+  const { results, query, page, totalItems } = searchState;
   animeList.replaceChildren();
-  resultCount.textContent = `${results.length} shown · page ${page}`;
+
+  resultCount.textContent = Number.isFinite(totalItems)
+    ? `${results.length} of ${formatNumber(totalItems)} · page ${page}`
+    : `${results.length} shown · page ${page}`;
 
   if (results.length === 0) {
     renderMessage(
@@ -266,6 +272,7 @@ const commitPage = (pageData, query, append) => {
     page: pageData.currentPage,
     results,
     hasNextPage: pageData.hasNextPage,
+    totalItems: pageData.totalItems,
   };
 
   renderResults();
@@ -295,7 +302,13 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
   rememberQueryInUrl(query);
 
   if (!append) {
-    searchState = { query, page: 0, results: [], hasNextPage: false };
+    searchState = {
+      query,
+      page: 0,
+      results: [],
+      hasNextPage: false,
+      totalItems: null,
+    };
     resultCount.textContent = "";
   }
 
@@ -320,6 +333,12 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
   }
 
   const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
   activeController = controller;
   const mode = append ? "more" : "search";
 
@@ -358,20 +377,34 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
     cache.set(cacheKey, createCacheEntry(pageData));
     commitPage(pageData, query, append);
   } catch (error) {
-    if (error.name === "AbortError" || requestId !== requestSequence) {
+    if (requestId !== requestSequence) {
+      return;
+    }
+
+    if (error.name === "AbortError" && !timedOut) {
       return;
     }
 
     if (append) {
-      setStatus(
-        error.message === "RATE_LIMITED"
-          ? `Jikan is rate-limiting requests. ${rateLimitMessage(error.retrySeconds ?? null)}`
-          : "Could not load the next page. Your current results are still here."
-      );
+      if (timedOut) {
+        setStatus("The next page took too long to respond. Your current results are still here.");
+      } else {
+        setStatus(
+          error.message === "RATE_LIMITED"
+            ? `Jikan is rate-limiting requests. ${rateLimitMessage(error.retrySeconds ?? null)}`
+            : "Could not load the next page. Your current results are still here."
+        );
+      }
       return;
     }
 
-    if (error.message === "RATE_LIMITED") {
+    if (timedOut) {
+      renderMessage(
+        "The anime API took too long to respond.",
+        "Nothing was changed. Try the search again in a moment."
+      );
+      setStatus("Search timed out. Please try again.");
+    } else if (error.message === "RATE_LIMITED") {
       renderMessage(
         "Jikan is rate-limiting requests right now.",
         rateLimitMessage(error.retrySeconds ?? null)
@@ -385,6 +418,8 @@ const searchAnime = async (rawQuery, { append = false } = {}) => {
       setStatus("Search failed. Please try again.");
     }
   } finally {
+    window.clearTimeout(timeoutId);
+
     if (requestId === requestSequence) {
       setBusy(false);
       activeController = null;
