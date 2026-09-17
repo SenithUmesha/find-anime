@@ -2,7 +2,7 @@
 
 FindAnime is a deliberately small static browser app built around one external dependency: the Jikan REST API.
 
-The useful engineering work is therefore not framework architecture. It is the network boundary: API drift, pagination, request races, cache expiry, safe rendering, incomplete third-party data and failure behavior.
+The useful engineering work is therefore not framework architecture. It is the network boundary: API drift, pagination, request races, request timeouts, cache expiry, safe rendering, incomplete third-party data and failure behavior.
 
 ## 1. Current system
 
@@ -15,6 +15,7 @@ index.html
          │
          ├── DOM / interaction state
          ├── AbortController + request sequencing
+         ├── timeout guard
          ├── page cache
          │
          └── lib/search.mjs
@@ -23,6 +24,7 @@ index.html
                ├── page merge rules
                ├── cache TTL helpers
                ├── Retry-After parsing
+               ├── timeout policy
                └── remote URL validation
                         │
                         ▼
@@ -61,7 +63,8 @@ with data and pagination separated:
   data: [...],
   pagination: {
     current_page: 1,
-    has_next_page: true
+    has_next_page: true,
+    items: { total: 84 }
   }
 }
 ```
@@ -106,28 +109,31 @@ check page cache
       abort older request
             │
             ▼
+      arm 12s timeout
+            │
+            ▼
       show loading state
             │
             ▼
         fetch Jikan
             │
-      ┌─────┼────────┐
-      │     │        │
-     429   !ok     success
-      │     │        │
-      │     │        ▼
-      │     │    parse payload
-      │     │        │
-      │     │        ▼
-      │     │    cache page
-      │     │        │
-      └─────┴────────┘
+      ┌─────┼───────────┐
+      │     │           │
+     429  timeout     success
+      │     │           │
+      │     │           ▼
+      │     │       parse payload
+      │     │           │
+      │     │           ▼
+      │     │       cache page
+      │     │           │
+      └─────┴───────────┘
             │
             ▼
  only latest request may commit
 ```
 
-Load-more uses the same path but increments the current page and preserves existing results if the append request fails.
+Load-more uses the same path but increments the current page and preserves existing results if the append request fails or times out.
 
 ## 4. Request race protection
 
@@ -160,7 +166,33 @@ must still be true before a response can change UI state.
 
 This is the actual correctness guard. Cancellation is useful, but the UI does not rely on cancellation timing for correctness.
 
-## 5. URL construction
+## 5. Timeout semantics
+
+Cancellation because the user searched again is different from cancellation because the API never responded.
+
+Each live network request gets a 12-second timer:
+
+```text
+request starts
+   │
+   ├── response arrives -> clear timeout
+   │
+   └── 12s expires -> mark timedOut -> abort controller
+```
+
+The catch path checks both request identity and `timedOut`.
+
+That produces three distinct outcomes:
+
+```text
+superseded request -> silent, because newer user intent exists
+fresh-search timeout -> visible timeout state
+load-more timeout -> keep current cards + status message
+```
+
+This prevents a hanging fetch from leaving the UI in an indefinite loading state while still keeping superseded requests quiet.
+
+## 6. URL construction
 
 `lib/search.mjs` builds Jikan URLs with `URL` / `URLSearchParams`:
 
@@ -175,9 +207,9 @@ Using the platform URL API means query encoding is not hand-written string conca
 
 Page values are normalized to at least `1`, so malformed internal input cannot produce page zero or a negative page request.
 
-## 6. Payload boundary
+## 7. Payload boundary
 
-`parseSearchPayload()` does not let the DOM code depend directly on every detail of the raw response.
+`parseSearchPayload()` does not let DOM code depend directly on every detail of the raw response.
 
 It produces:
 
@@ -185,7 +217,8 @@ It produces:
 {
   results,
   currentPage,
-  hasNextPage
+  hasNextPage,
+  totalItems
 }
 ```
 
@@ -195,10 +228,12 @@ The parser:
 - drops non-object entries
 - normalizes invalid/missing current-page values to `1`
 - turns pagination continuation into a boolean
+- converts `pagination.items.total` into a finite non-negative number when possible
+- otherwise exposes `totalItems: null`
 
-That is intentionally a small adapter, not a second giant model hierarchy.
+The UI can therefore show `36 of 84 · page 2` when total metadata exists without coupling rendering directly to Jikan's nested response shape.
 
-## 7. Pagination and merge semantics
+## 8. Pagination and merge semantics
 
 Each request asks Jikan for 18 records.
 
@@ -224,23 +259,23 @@ The incoming page wins when the same identity appears twice, which is useful if 
 
 The load-more button is shown only when there are results and Jikan reports `has_next_page`.
 
-## 8. Append failures preserve successful work
+## 9. Append failures preserve successful work
 
 A page-2 failure should not erase page 1.
 
 For a fresh-search failure, the result region becomes an error state.
 
-For an append failure:
+For an append failure or timeout:
 
 ```text
 current cards stay rendered
 +
-status text explains load-more failed
+status text explains what failed
 ```
 
-That distinction is small but important. The client keeps already-successful user-visible work instead of treating every request as all-or-nothing.
+The client keeps already-successful user-visible work instead of treating every request as all-or-nothing.
 
-## 9. Short-lived cache
+## 10. Short-lived cache
 
 The cache key is:
 
@@ -271,7 +306,7 @@ The cache remains memory-only. Closing/reloading the page drops it.
 
 That is a deliberate product boundary: this is request de-duplication and short-term responsiveness, not an offline anime database.
 
-## 10. Why cache expiry matters
+## 11. Why cache expiry matters
 
 The earlier in-memory cache lived for the entire tab session with no invalidation rule.
 
@@ -279,7 +314,7 @@ That is fine for a prototype, but an explicit TTL is a better model because anim
 
 The TTL helper accepts an injected `now` value, which makes expiry behavior deterministic in tests.
 
-## 11. Rate limiting is a normal state
+## 12. Rate limiting is a normal state
 
 Jikan is a public API. HTTP `429` is therefore an expected operational outcome, not an impossible exception.
 
@@ -289,13 +324,14 @@ Supported forms include:
 
 ```text
 Retry-After: 12
+Retry-After: Thu, 17 Sep 2026 15:00:08 GMT
 ```
 
-and HTTP-date values.
+`retryAfterSeconds()` accepts an injectable clock value, so HTTP-date handling can be tested deterministically instead of depending on wall-clock timing.
 
 The UI can then say approximately how long to wait rather than returning an empty grid that looks like "no anime found".
 
-## 12. Rendering remote content safely
+## 13. Rendering remote content safely
 
 The original project interpolated API fields into an HTML string and assigned it through `innerHTML`.
 
@@ -312,7 +348,7 @@ Remote titles, synopses, genres and metadata therefore remain text instead of be
 
 For a small project, this is both safer and easier to reason about than sanitizing generated HTML.
 
-## 13. URL validation
+## 14. URL validation
 
 Text safety and URL safety are separate problems.
 
@@ -339,9 +375,17 @@ jpg.image_url
 local img/icon.png fallback
 ```
 
-If the chosen remote image later fails to load, the image element also falls back to the bundled icon.
+If the chosen remote image later fails to load, the image element falls back to the bundled icon.
 
-## 14. External-tab isolation
+Remote poster images also use:
+
+```js
+image.referrerPolicy = "no-referrer";
+```
+
+so the image host does not receive the FindAnime page URL as HTTP referrer data.
+
+## 15. External-tab isolation
 
 Valid MyAnimeList links use:
 
@@ -350,9 +394,9 @@ target="_blank"
 rel="noopener noreferrer"
 ```
 
-`noopener` prevents the destination page from getting a useful `window.opener` reference back to FindAnime.
+`noopener` prevents the destination page from getting a useful `window.opener` reference back to FindAnime, while `noreferrer` also suppresses the originating page URL.
 
-## 15. Display fallbacks
+## 16. Display fallbacks
 
 Jikan records are not assumed to be complete.
 
@@ -369,7 +413,7 @@ Other optional fields—score, episodes, year, status, genres, members and synop
 
 That keeps unreleased/obscure/incomplete titles from breaking card construction.
 
-## 16. Result-card model
+## 17. Result-card model
 
 A card roughly contains:
 
@@ -390,7 +434,7 @@ members                       More info ↗
 
 The app intentionally does not reproduce an entire MyAnimeList detail page. Search gives enough information to decide whether to open the source page.
 
-## 17. Query URL state
+## 18. Query URL state
 
 The current query is stored in:
 
@@ -400,7 +444,7 @@ The current query is stored in:
 
 with `history.replaceState()`.
 
-That gives the one-screen app the useful routing behavior:
+That gives the one-screen app useful routing behavior:
 
 - reload restores the search
 - copied URLs keep search intent
@@ -408,7 +452,7 @@ That gives the one-screen app the useful routing behavior:
 
 Pagination itself is not written to the URL; load-more is progressive UI state rather than a separate navigable page in this small product.
 
-## 18. Loading and empty states
+## 19. Loading and failure states
 
 The result surface explicitly models:
 
@@ -417,8 +461,10 @@ initial
 loading skeletons
 results
 empty result
-fresh-search error
+fresh-search timeout
+fresh-search HTTP/network error
 rate limited
+append timeout
 append error
 ```
 
@@ -426,7 +472,7 @@ Skeletons are presentation-only and marked `aria-hidden`.
 
 The result grid uses `aria-busy`, and a polite live region announces search status changes.
 
-## 19. Accessibility choices
+## 20. Accessibility choices
 
 The current UI uses:
 
@@ -435,15 +481,18 @@ The current UI uses:
 - hidden-but-accessible input label
 - native button controls
 - Enter-to-submit behavior
+- `aria-controls` connecting the search input to the result region
 - `aria-busy` during requests
 - `role="status"` / `aria-live="polite"`
 - meaningful poster alt text
 - visible focus treatment
 - reduced-motion handling
 
-It is not presented as a formal accessibility audit, but the interaction model starts with browser semantics rather than custom clickable containers.
+The search input is capped at 120 characters as a small client-side sanity boundary.
 
-## 20. Performance model
+This is not presented as a formal accessibility audit, but the interaction model starts with browser semantics rather than custom clickable containers.
+
+## 21. Performance model
 
 The application has no framework runtime or bundle graph.
 
@@ -461,6 +510,7 @@ Useful choices include:
 
 - short-lived page cache
 - aborting superseded requests
+- timing out stuck requests
 - lazy image loading
 - async image decoding
 - `DocumentFragment` for batched card append
@@ -468,7 +518,7 @@ Useful choices include:
 
 The third-party images are normally much heavier than the app's own JavaScript.
 
-## 21. Privacy boundary
+## 22. Privacy boundary
 
 FindAnime has no first-party account, database, analytics SDK or server.
 
@@ -480,9 +530,9 @@ poster request -> remote image host
 link click -> MyAnimeList
 ```
 
-So the product copy says there is no first-party tracking rather than implying no external service receives network traffic.
+The repository therefore says **no first-party analytics**, not "no network visibility". Poster requests additionally suppress referrer information, but the remote image host still receives the image request itself.
 
-## 22. Testing strategy
+## 23. Testing strategy
 
 `lib/search.mjs` is deliberately DOM-free so important rules can be tested with Node's built-in test runner.
 
@@ -491,11 +541,14 @@ Current tests cover:
 ```text
 query normalization
 URL/page construction
+timeout configuration
 Jikan payload parsing
+pagination total parsing
 invalid response records
 page deduplication
 cache expiry
 Retry-After seconds
+Retry-After HTTP dates
 HTTPS validation
 MyAnimeList host restriction
 title/image fallbacks
@@ -509,7 +562,7 @@ node --test tests/*.test.mjs
 
 No npm install is required.
 
-## 23. CI
+## 24. CI
 
 GitHub Actions runs on pushes to `main` and pull requests.
 
@@ -517,13 +570,17 @@ The workflow checks:
 
 ```text
 node --check app.js
+node --check lib/search.mjs
 node --test tests/*.test.mjs
-runtime tree contains no api.jikan.moe/v3 endpoint
+runtime sources contain no api.jikan.moe/v3 endpoint
+required static assets exist
 ```
 
-The last check is intentionally specific to this repository's history: the retired v3 endpoint is exactly the integration that silently aged out once already.
+The retired-endpoint guard deliberately targets runtime source files rather than recursively grepping the entire repository. That matters because documentation and the workflow itself legitimately mention the old v3 URL as historical context.
 
-## 24. Why there is still no framework
+That exact distinction fixed a false-positive CI failure during the overhaul.
+
+## 25. Why there is still no framework
 
 This app needs:
 
@@ -542,7 +599,7 @@ The browser already provides all of them.
 
 React/Vue/Svelte would become easier to justify if the product grew multiple routes, richer shared state, favorites/details workflows or reusable interactive surfaces. They are not automatically an upgrade for one search screen.
 
-## 25. Sensible next steps
+## 26. Sensible next steps
 
 If the side quest grows, useful next steps are:
 
@@ -558,4 +615,4 @@ I would not add authentication, a database or a backend before a feature actuall
 
 The current architecture has one job:
 
-> **turn a title into useful anime results with as little machinery as possible, while still behaving correctly when the network is slow, stale, paginated or rate-limited.**
+> **turn a title into useful anime results with as little machinery as possible, while still behaving correctly when the network is slow, stale, paginated, rate-limited or temporarily unavailable.**
