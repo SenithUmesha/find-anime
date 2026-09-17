@@ -1,5 +1,14 @@
-const API_URL = "https://api.jikan.moe/v4/anime";
-const RESULT_LIMIT = 18;
+import {
+  buildSearchUrl,
+  cacheKeyForSearch,
+  firstValue,
+  imageForAnime,
+  mergeAnimeResults,
+  normalizeQuery,
+  parseSearchPayload,
+  safeMyAnimeListUrl,
+  titleForAnime,
+} from "./lib/search.mjs";
 
 const searchForm = document.getElementById("search-form");
 const searchInput = document.getElementById("search-input");
@@ -8,45 +17,42 @@ const animeList = document.getElementById("anime");
 const searchStatus = document.getElementById("search-status");
 const resultCount = document.getElementById("result-count");
 const quickSearches = document.querySelectorAll("[data-query]");
+const loadMoreRow = document.getElementById("load-more-row");
+const loadMoreButton = document.getElementById("load-more-btn");
 
 const cache = new Map();
 let activeController = null;
 let requestSequence = 0;
+let requestMode = null;
+let searchState = {
+  query: "",
+  page: 0,
+  results: [],
+  hasNextPage: false,
+};
 
-const setBusy = (isBusy) => {
+const setBusy = (isBusy, mode = null) => {
+  requestMode = isBusy ? mode : null;
   animeList.setAttribute("aria-busy", String(isBusy));
-  searchButton.disabled = isBusy;
-  searchButton.textContent = isBusy ? "Searching…" : "Search";
+  searchButton.disabled = isBusy && mode === "search";
+  searchButton.textContent = isBusy && mode === "search" ? "Searching…" : "Search";
+  loadMoreButton.disabled = isBusy;
+  loadMoreButton.textContent = isBusy && mode === "more" ? "Loading…" : "Load more";
 };
 
 const setStatus = (message) => {
   searchStatus.textContent = message;
 };
 
+const updateLoadMore = () => {
+  const shouldShow =
+    searchState.results.length > 0 && searchState.hasNextPage && requestMode !== "search";
+
+  loadMoreRow.hidden = !shouldShow;
+};
+
 const formatNumber = (value) =>
   typeof value === "number" ? new Intl.NumberFormat("en").format(value) : null;
-
-const firstValue = (...values) =>
-  values.find(
-    (value) => value !== null && value !== undefined && value !== ""
-  );
-
-const imageForAnime = (anime) =>
-  firstValue(
-    anime.images?.webp?.large_image_url,
-    anime.images?.jpg?.large_image_url,
-    anime.images?.webp?.image_url,
-    anime.images?.jpg?.image_url,
-    "img/icon.png"
-  );
-
-const titleForAnime = (anime) =>
-  firstValue(
-    anime.title_english,
-    anime.title,
-    anime.title_japanese,
-    "Untitled anime"
-  );
 
 const createElement = (tag, className, text) => {
   const element = document.createElement(tag);
@@ -66,19 +72,26 @@ const createMetaPill = (text) => createElement("span", "meta-pill", text);
 
 const createAnimeCard = (anime) => {
   const card = createElement("article", "anime-card");
+  const preferredTitle = titleForAnime(anime);
+  const malUrl = safeMyAnimeListUrl(anime.url);
 
-  const imageLink = createElement("a", "poster-link");
-  imageLink.href = anime.url || "#";
-  imageLink.target = "_blank";
-  imageLink.rel = "noopener noreferrer";
-  imageLink.setAttribute(
-    "aria-label",
-    `Open ${titleForAnime(anime)} on MyAnimeList`
-  );
+  const posterContainer = malUrl
+    ? createElement("a", "poster-link")
+    : createElement("div", "poster-link");
+
+  if (malUrl) {
+    posterContainer.href = malUrl;
+    posterContainer.target = "_blank";
+    posterContainer.rel = "noopener noreferrer";
+    posterContainer.setAttribute(
+      "aria-label",
+      `Open ${preferredTitle} on MyAnimeList`
+    );
+  }
 
   const image = createElement("img", "anime-poster");
   image.src = imageForAnime(anime);
-  image.alt = `${titleForAnime(anime)} poster`;
+  image.alt = `${preferredTitle} poster`;
   image.loading = "lazy";
   image.decoding = "async";
   image.addEventListener(
@@ -89,17 +102,16 @@ const createAnimeCard = (anime) => {
     { once: true }
   );
 
-  imageLink.appendChild(image);
-  card.appendChild(imageLink);
+  posterContainer.appendChild(image);
+  card.appendChild(posterContainer);
 
   const body = createElement("div", "anime-card-body");
-
   const headingRow = createElement("div", "anime-heading-row");
   const headingBlock = createElement("div");
-  const title = createElement("h3", "anime-title", titleForAnime(anime));
+  const title = createElement("h3", "anime-title", preferredTitle);
   headingBlock.appendChild(title);
 
-  if (anime.title_japanese && anime.title_japanese !== titleForAnime(anime)) {
+  if (anime.title_japanese && anime.title_japanese !== preferredTitle) {
     headingBlock.appendChild(
       createElement("p", "anime-alt-title", anime.title_japanese)
     );
@@ -110,7 +122,7 @@ const createAnimeCard = (anime) => {
   const score = createElement(
     "span",
     "score-badge",
-    anime.score ? `★ ${anime.score.toFixed(1)}` : "★ —"
+    typeof anime.score === "number" ? `★ ${anime.score.toFixed(1)}` : "★ —"
   );
   score.title = anime.scored_by
     ? `${formatNumber(anime.scored_by)} MyAnimeList scores`
@@ -134,19 +146,25 @@ const createAnimeCard = (anime) => {
     .forEach((value) => meta.appendChild(createMetaPill(value)));
   body.appendChild(meta);
 
-  const synopsis = createElement(
-    "p",
-    "anime-synopsis",
-    anime.synopsis || "No synopsis is available for this title yet."
+  body.appendChild(
+    createElement(
+      "p",
+      "anime-synopsis",
+      anime.synopsis || "No synopsis is available for this title yet."
+    )
   );
-  body.appendChild(synopsis);
 
   if (Array.isArray(anime.genres) && anime.genres.length > 0) {
     const genres = createElement("div", "genre-list");
     anime.genres.slice(0, 4).forEach((genre) => {
-      genres.appendChild(createElement("span", "genre-chip", genre.name));
+      if (genre?.name) {
+        genres.appendChild(createElement("span", "genre-chip", genre.name));
+      }
     });
-    body.appendChild(genres);
+
+    if (genres.childElementCount > 0) {
+      body.appendChild(genres);
+    }
   }
 
   const footer = createElement("div", "anime-card-footer");
@@ -161,11 +179,13 @@ const createAnimeCard = (anime) => {
     );
   }
 
-  const moreInfo = createElement("a", "anime-link", "More info ↗");
-  moreInfo.href = anime.url || "#";
-  moreInfo.target = "_blank";
-  moreInfo.rel = "noopener noreferrer";
-  footer.appendChild(moreInfo);
+  if (malUrl) {
+    const moreInfo = createElement("a", "anime-link", "More info ↗");
+    moreInfo.href = malUrl;
+    moreInfo.target = "_blank";
+    moreInfo.rel = "noopener noreferrer";
+    footer.appendChild(moreInfo);
+  }
 
   body.appendChild(footer);
   card.appendChild(body);
@@ -175,6 +195,8 @@ const createAnimeCard = (anime) => {
 
 const renderMessage = (title, message) => {
   animeList.replaceChildren();
+  resultCount.textContent = "";
+  loadMoreRow.hidden = true;
 
   const state = createElement("div", "results-state");
   state.appendChild(createElement("strong", null, title));
@@ -184,6 +206,7 @@ const renderMessage = (title, message) => {
 
 const renderLoading = () => {
   animeList.replaceChildren();
+  loadMoreRow.hidden = true;
 
   for (let index = 0; index < 6; index += 1) {
     const skeleton = createElement("div", "anime-card skeleton-card");
@@ -203,11 +226,10 @@ const renderLoading = () => {
   }
 };
 
-const renderResults = (results, query) => {
+const renderResults = () => {
+  const { results, query, page } = searchState;
   animeList.replaceChildren();
-  resultCount.textContent = `${results.length} result${
-    results.length === 1 ? "" : "s"
-  }`;
+  resultCount.textContent = `${results.length} shown · page ${page}`;
 
   if (results.length === 0) {
     renderMessage(
@@ -222,14 +244,7 @@ const renderResults = (results, query) => {
   results.forEach((anime) => fragment.appendChild(createAnimeCard(anime)));
   animeList.appendChild(fragment);
   setStatus(`Showing ${results.length} results for ${query}.`);
-};
-
-const buildSearchUrl = (query) => {
-  const url = new URL(API_URL);
-  url.searchParams.set("q", query);
-  url.searchParams.set("limit", String(RESULT_LIMIT));
-  url.searchParams.set("sfw", "true");
-  return url;
+  updateLoadMore();
 };
 
 const rememberQueryInUrl = (query) => {
@@ -238,8 +253,23 @@ const rememberQueryInUrl = (query) => {
   window.history.replaceState(null, "", url);
 };
 
-const searchAnime = async (rawQuery) => {
-  const query = rawQuery.trim();
+const commitPage = (pageData, query, append) => {
+  const results = append
+    ? mergeAnimeResults(searchState.results, pageData.results)
+    : pageData.results;
+
+  searchState = {
+    query,
+    page: pageData.currentPage,
+    results,
+    hasNextPage: pageData.hasNextPage,
+  };
+
+  renderResults();
+};
+
+const searchAnime = async (rawQuery, { append = false } = {}) => {
+  const query = normalizeQuery(rawQuery);
 
   if (!query) {
     searchInput.focus();
@@ -247,9 +277,19 @@ const searchAnime = async (rawQuery) => {
     return;
   }
 
+  if (append && (query !== searchState.query || !searchState.hasNextPage)) {
+    return;
+  }
+
+  const page = append ? searchState.page + 1 : 1;
+
   searchInput.value = query;
   rememberQueryInUrl(query);
-  resultCount.textContent = "";
+
+  if (!append) {
+    searchState = { query, page: 0, results: [], hasNextPage: false };
+    resultCount.textContent = "";
+  }
 
   if (activeController) {
     activeController.abort();
@@ -257,23 +297,29 @@ const searchAnime = async (rawQuery) => {
   }
 
   const requestId = ++requestSequence;
-  const cacheKey = query.toLowerCase();
+  const cacheKey = cacheKeyForSearch(query, page);
+  const cachedPage = cache.get(cacheKey);
 
-  if (cache.has(cacheKey)) {
+  if (cachedPage) {
+    commitPage(cachedPage, query, append);
     setBusy(false);
-    renderResults(cache.get(cacheKey), query);
+    updateLoadMore();
     return;
   }
 
   const controller = new AbortController();
   activeController = controller;
+  const mode = append ? "more" : "search";
 
-  setBusy(true);
-  setStatus(`Searching for ${query}…`);
-  renderLoading();
+  setBusy(true, mode);
+  setStatus(append ? `Loading more ${query} results…` : `Searching for ${query}…`);
+
+  if (!append) {
+    renderLoading();
+  }
 
   try {
-    const response = await fetch(buildSearchUrl(query), {
+    const response = await fetch(buildSearchUrl(query, page), {
       signal: controller.signal,
       headers: {
         Accept: "application/json",
@@ -288,25 +334,27 @@ const searchAnime = async (rawQuery) => {
       throw new Error(`HTTP_${response.status}`);
     }
 
-    const payload = await response.json();
-    const results = Array.isArray(payload.data) ? payload.data : [];
+    const pageData = parseSearchPayload(await response.json());
 
     if (requestId !== requestSequence) {
       return;
     }
 
-    cache.set(cacheKey, results);
-    renderResults(results, query);
+    cache.set(cacheKey, pageData);
+    commitPage(pageData, query, append);
   } catch (error) {
-    if (error.name === "AbortError") {
+    if (error.name === "AbortError" || requestId !== requestSequence) {
       return;
     }
 
-    if (requestId !== requestSequence) {
+    if (append) {
+      setStatus(
+        error.message === "RATE_LIMITED"
+          ? "Jikan is rate-limiting requests. Wait a moment before loading more."
+          : "Could not load the next page. Your current results are still here."
+      );
       return;
     }
-
-    resultCount.textContent = "";
 
     if (error.message === "RATE_LIMITED") {
       renderMessage(
@@ -325,6 +373,7 @@ const searchAnime = async (rawQuery) => {
     if (requestId === requestSequence) {
       setBusy(false);
       activeController = null;
+      updateLoadMore();
     }
   }
 };
@@ -336,12 +385,17 @@ searchForm.addEventListener("submit", (event) => {
 
 quickSearches.forEach((button) => {
   button.addEventListener("click", () => {
-    const query = button.dataset.query || "";
-    searchAnime(query);
+    searchAnime(button.dataset.query || "");
   });
 });
 
-const initialQuery = new URL(window.location.href).searchParams.get("q");
+loadMoreButton.addEventListener("click", () => {
+  searchAnime(searchState.query, { append: true });
+});
+
+const initialQuery = normalizeQuery(
+  new URL(window.location.href).searchParams.get("q")
+);
 
 if (initialQuery) {
   searchAnime(initialQuery);
