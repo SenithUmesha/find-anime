@@ -11,7 +11,7 @@
     <title>FindAnime — tiny anime search</title>
     <link rel="icon" href="img/icon.png" type="image/png" />
     <link rel="stylesheet" href="style.css" />
-    <script src="app.js" defer></script>
+    <script type="module" src="app.js"></script>
   </head>
 
   <body>
@@ -61,6 +61,12 @@
         </div>
 
         <div class="anime-grid" id="anime" aria-busy="false"></div>
+
+        <div class="load-more-row" id="load-more-row" hidden>
+          <button class="load-more-button" id="load-more-btn" type="button">
+            Load more
+          </button>
+        </div>
       </section>
 
       <footer class="site-footer">
