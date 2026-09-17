@@ -152,8 +152,7 @@ find-anime/
 ├── index.html
 ├── style.css
 ├── img/
-│   ├── icon.png
-│   └── one_piece.jpg
+│   └── icon.png
 └── docs/
     └── engineering.md
 ```
