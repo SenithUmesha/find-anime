@@ -24,12 +24,23 @@ jobs:
       - name: Check browser module syntax
         run: node --check app.js
 
+      - name: Check helper module syntax
+        run: node --check lib/search.mjs
+
       - name: Run search helper tests
         run: node --test tests/*.test.mjs
 
       - name: Guard against the retired Jikan v3 endpoint
         run: |
-          if grep -R "api.jikan.moe/v3" --exclude-dir=.git --exclude="README.md" --exclude="engineering.md" .; then
-            echo "Retired Jikan v3 endpoint found in runtime files."
+          if grep -n "api.jikan.moe/v3" app.js lib/*.mjs index.html; then
+            echo "Retired Jikan v3 endpoint found in runtime sources."
             exit 1
           fi
+
+      - name: Verify required static assets
+        run: |
+          test -f index.html
+          test -f style.css
+          test -f app.js
+          test -f lib/search.mjs
+          test -f img/icon.png
